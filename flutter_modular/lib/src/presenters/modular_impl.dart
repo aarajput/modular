@@ -15,8 +15,11 @@ late Module _initialModule;
 class ModularImpl implements ModularInterface {
   final ModularRouterDelegate routerDelegate;
   final Map<String, Module> injectMap;
+  final ModularFlags flags;
+
   @override
   IModularNavigator? navigatorDelegate;
+
   List<Bind>? _overrideBinds;
 
   @override
@@ -28,6 +31,7 @@ class ModularImpl implements ModularInterface {
   ModularArguments? get args => routerDelegate.args;
 
   ModularImpl({
+    required this.flags,
     required this.routerDelegate,
     required this.injectMap,
   });
@@ -51,7 +55,9 @@ class ModularImpl implements ModularInterface {
       module.instance();
       debugPrintModular("-- ${module.runtimeType.toString()} INITIALIZED");
     } else {
-      injectMap[name]?.paths.add(path);
+      // Add the new path only if the last path in paths list is different from the current one
+      final _paths = injectMap[name]?.paths;
+      if (_paths?.last != path) _paths?.add(path);
     }
   }
 
@@ -83,6 +89,13 @@ class ModularImpl implements ModularInterface {
   @override
   B get<B extends Object>({List<Type>? typesInRequestList, B? defaultValue}) {
     var typesInRequest = typesInRequestList ?? [];
+    if (Modular.flags.experimentalNotAllowedParentBinds) {
+      final module = routerDelegate.currentConfiguration?.currentModule?.runtimeType.toString() ?? '=global';
+      var bind = injectMap[module]!.binds.firstWhere((b) => b.inject is B Function(Inject), orElse: () => BindEmpty());
+      if (bind is BindEmpty) {
+        throw ModularError('\"${B.toString()}\" not found in \"$module\" module');
+      }
+    }
     var result = _findExistingInstance<B>();
 
     if (result != null) {
@@ -110,9 +123,7 @@ class ModularImpl implements ModularInterface {
   }) {
     B? value;
     var typesInRequest = typesInRequestList ?? [];
-    if (!checkKey) {
-      value = injectMap[tag]?.getBind<B>(typesInRequest: typesInRequest);
-    } else if (injectMap.containsKey(tag)) {
+    if (!checkKey || injectMap.containsKey(tag)) {
       value = injectMap[tag]?.getBind<B>(typesInRequest: typesInRequest);
     }
 
@@ -122,6 +133,27 @@ class ModularImpl implements ModularInterface {
   @override
   bool dispose<B extends Object>() {
     var isDisposed = false;
+
+    /// Logic to check if bind is in the injectMap
+    /// Cause true -> continue the normal flow
+    /// Otherwise -> returns true to don't make dispose again
+    var check = false;
+
+    for (var key in injectMap.keys) {
+      if (check) break;
+
+      final _binds = injectMap[key]?.binds ?? [];
+
+      for (var element in _binds) {
+        if (element.inject is B Function(Inject<dynamic>)) {
+          check = true;
+          break;
+        }
+      }
+    }
+
+    if (!check) return true;
+
     for (var key in injectMap.keys) {
       if (_removeInjectableObject<B>(key)) {
         isDisposed = true;
